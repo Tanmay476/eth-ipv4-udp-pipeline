@@ -1,0 +1,36 @@
+# Simulation files
+sim/
+*.vcd
+*.fsdb
+*.wlf
+*.log
+transcript
+work/
+*.vstf
+
+# Synthesis files
+*.bit
+*.mcs
+*.bin
+*.rpt
+*.dcp
+*.jou
+*.str
+.Xil/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
