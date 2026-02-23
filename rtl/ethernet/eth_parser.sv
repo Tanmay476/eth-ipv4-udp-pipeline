@@ -22,28 +22,35 @@
 //   - FCS/CRC validation
 //================================================================================
 
-module eth_parser(
+module eth_parser #(
     parameter DATA_BUS_WIDTH = 8, // Width of the data bus in bits
-    parameter ENABLE_VLAN = 0,// 
-    parameter CHECK_FCS = 0, // Validate CRC
-    parameter MIN_FRAME_SIZE = 8 // Minimum Ethernet frame size in bytes
+    parameter ENABLE_VLAN    = 0, // VLAN tagging support (not implemented)
+    parameter CHECK_FCS      = 0, // Validate CRC (not implemented)
+    parameter MIN_FRAME_SIZE = 64 // Minimum Ethernet frame size in bytes
 )(
-    input logic clk,
-    input logic rst_n,
-    input logic[7:0] s_axis_tdata,
-    input logic s_axis_tlast,
-    input logic s_axis_tvalid,
-    output logic s_axis_tready,
-    output logic[7:0] m_axis_tdata,
-    output logic m_axis_tvalid,
-    output logic m_axis_tlast,
-    input logic m_axis_tready,
-    output logic[47:0] dest_mac,
-    output logic[47:0] src_mac,
-    output logic[15:0] ether_type
+    input  logic        clk,
+    input  logic        rst_n,
+
+    // AXI-Stream Slave Interface
+    input  logic [7:0]  s_axis_tdata,
+    input  logic        s_axis_tlast,
+    input  logic        s_axis_tvalid,
+    output logic        s_axis_tready,
+
+    // AXI-Stream Master Interface (IPv4 payload)
+    output logic [7:0]  m_axis_tdata,
+    output logic        m_axis_tvalid,
+    output logic        m_axis_tlast,
+    input  logic        m_axis_tready,
+
+    // Extracted Ethernet Header Fields
+    output logic [47:0] dest_mac,
+    output logic [47:0] src_mac,
+    output logic [15:0] ether_type
 );
 
-typedef enum logic[2:0]{
+// ─── State machine ────────────────────────────────────────────────────────────
+typedef enum logic [2:0] {
     IDLE,
     PARSE_HEADER,
     CHECK_ETHERTYPE,
@@ -51,127 +58,120 @@ typedef enum logic[2:0]{
     FORWARD_PAYLOAD
 } state_t;
 
-state_t state;
-state_t next_state;
-logic[$clog2(15):0] byte_count;
-logic[47:0] dest_mac_buffer;
-logic[47:0] src_mac_buffer;
-logic[15:0] ether_type_buffer;
+state_t state, next_state;
 
-always @(posedge clk) begin
-    if (!rst_n) begin
-        state <= IDLE;
-        next_state <= IDLE;
-    end else begin
-        state <= next_state;
-    end
+// ─── Internal registers ───────────────────────────────────────────────────────
+logic [3:0]  byte_count;          // 4 bits: counts 0-13 for 14-byte header
+logic [47:0] dest_mac_buf;
+logic [47:0] src_mac_buf;
+logic [15:0] ether_type_buf;
+
+// ─── State register ───────────────────────────────────────────────────────────
+always_ff @(posedge clk) begin
+    if (!rst_n) state <= IDLE;
+    else        state <= next_state;
 end
 
+// ─── Next-state logic ─────────────────────────────────────────────────────────
 always_comb begin
-    case(state)
-    IDLE: 
-        if (s_axis_tvalid) begin
-            next_state = PARSE_HEADER;
-        end else begin
+    next_state = state;
+    case (state)
+        IDLE:
+            next_state = s_axis_tvalid ? PARSE_HEADER : IDLE;
+
+        PARSE_HEADER:
+            // Transition after byte 13 (the last header byte) is accepted
+            next_state = (byte_count == 4'd13 && s_axis_tvalid && s_axis_tready)
+                         ? CHECK_ETHERTYPE : PARSE_HEADER;
+
+        CHECK_ETHERTYPE:
+            next_state = (ether_type_buf == 16'h0800) ? FORWARD_PAYLOAD : DROP_FRAME;
+
+        DROP_FRAME:
+            next_state = (s_axis_tlast && s_axis_tvalid && s_axis_tready)
+                         ? IDLE : DROP_FRAME;
+
+        FORWARD_PAYLOAD:
+            next_state = (s_axis_tlast && s_axis_tvalid && s_axis_tready)
+                         ? IDLE : FORWARD_PAYLOAD;
+
+        default:
             next_state = IDLE;
-        end
-    PARSE_HEADER:
-        if (byte_count == 14) begin
-            next_state = CHECK_ETHERTYPE;
-        end else begin
-            next_state = PARSE_HEADER;
-        end
-    CHECK_ETHERTYPE:
-        if (ether_type == 16'h0800) begin
-            next_state = FORWARD_PAYLOAD;
-        end else begin
-            next_state = DROP_FRAME;
-        end
-    DROP_FRAME:
-        if (s_axis_tlast) begin
-            next_state = IDLE;
-        end else begin
-            next_state = DROP_FRAME;
-        end
-    FORWARD_PAYLOAD:
-        if (s_axis_tlast) begin
-            next_state = IDLE;
-        end else begin
-            next_state = FORWARD_PAYLOAD;
-        end
-    default:
-        next_state = IDLE;      
     endcase
 end
 
-always_ff(@posedge clk) begin
+// ─── Data path ────────────────────────────────────────────────────────────────
+always_ff @(posedge clk) begin
     if (!rst_n) begin
-        byte_count <= 0;
-        dest_mac_buffer <= 0;
-        src_mac_buffer <= 0;
-        ether_type_buffer <= 0;
-        m_axis_tdata <= 0;
-        m_axis_tlast <= 0;
+        byte_count    <= 4'd0;
+        dest_mac_buf  <= 48'd0;
+        src_mac_buf   <= 48'd0;
+        ether_type_buf <= 16'd0;
+        m_axis_tdata  <= 8'd0;
+        m_axis_tlast  <= 1'b0;
     end else begin
-        // Reset byte_count when returning to IDLE
-        if (state == IDLE) begin
-            byte_count <= 0;
-        end
+        // Reset byte counter when the current transfer finishes (next state = IDLE)
+        if (next_state == IDLE)
+            byte_count <= 4'd0;
 
         if (s_axis_tvalid && s_axis_tready) begin
-            if (byte_count < 6) begin
-                dest_mac_buffer[47-(byte_count*8) -: 8] <= s_axis_tdata;
-            end else if((byte_count >= 6) && (byte_count < 12)) begin
-                src_mac_buffer[47-((byte_count-6)*8) -: 8] <= s_axis_tdata;
-            end else if (byte_count == 12) begin
-                ether_type_buffer[15:8] <= s_axis_tdata;
-            end else if (byte_count == 13) begin
-                ether_type_buffer[7:0] <= s_axis_tdata;
-            end else if (byte_count > 13) begin
-                if (state == FORWARD_PAYLOAD) begin
+            case (state)
+                // In IDLE the first payload byte is already valid; treat it as byte 0
+                IDLE, PARSE_HEADER: begin
+                    if      (byte_count < 4'd6)
+                        dest_mac_buf[47 - (byte_count * 8) -: 8] <= s_axis_tdata;
+                    else if (byte_count < 4'd12)
+                        src_mac_buf[47 - ((byte_count - 4'd6) * 8) -: 8] <= s_axis_tdata;
+                    else if (byte_count == 4'd12)
+                        ether_type_buf[15:8] <= s_axis_tdata;
+                    else if (byte_count == 4'd13)
+                        ether_type_buf[7:0]  <= s_axis_tdata;
+
+                    byte_count <= byte_count + 4'd1;
+                end
+
+                FORWARD_PAYLOAD: begin
                     if (m_axis_tready) begin
                         m_axis_tdata <= s_axis_tdata;
                         m_axis_tlast <= s_axis_tlast;
                     end
                 end
-            end
-            byte_count <= byte_count + 1;
+
+                default: ;
+            endcase
         end else begin
-            // Clear tlast when not actively transferring
-            if (!s_axis_tvalid || state == IDLE) begin
-                m_axis_tlast <= 0;
-            end
+            if (state == IDLE)
+                m_axis_tlast <= 1'b0;
         end
     end
 end
 
+// ─── Output assignments ───────────────────────────────────────────────────────
 always_comb begin
-    // Default assignments
-    dest_mac = dest_mac_buffer;
-    src_mac = src_mac_buffer;
-    ether_type = ether_type_buffer;
+    dest_mac   = dest_mac_buf;
+    src_mac    = src_mac_buf;
+    ether_type = ether_type_buf;
 
-    // Control signals based on state
-    case(state)
+    case (state)
         IDLE: begin
             m_axis_tvalid = 1'b0;
-            s_axis_tready = 1'b1; // Ready to accept new frame
+            s_axis_tready = 1'b1;
         end
         PARSE_HEADER: begin
             m_axis_tvalid = 1'b0;
-            s_axis_tready = 1'b1; // Ready to accept header bytes
+            s_axis_tready = 1'b1;
         end
         CHECK_ETHERTYPE: begin
             m_axis_tvalid = 1'b0;
-            s_axis_tready = 1'b0; // Not ready while checking
+            s_axis_tready = 1'b0;   // Stall upstream while deciding
         end
         FORWARD_PAYLOAD: begin
-            m_axis_tvalid = s_axis_tvalid; // Pass through valid signal
-            s_axis_tready = m_axis_tready; // Backpressure from downstream
+            m_axis_tvalid = s_axis_tvalid;
+            s_axis_tready = m_axis_tready;
         end
         DROP_FRAME: begin
-            m_axis_tvalid = 1'b0; // Don't forward data
-            s_axis_tready = 1'b1; // Accept data to drain the frame
+            m_axis_tvalid = 1'b0;
+            s_axis_tready = 1'b1;   // Drain the frame
         end
         default: begin
             m_axis_tvalid = 1'b0;
@@ -180,3 +180,4 @@ always_comb begin
     endcase
 end
 
+endmodule
