@@ -1,6 +1,5 @@
 # =============================================================================
 # timing.xdc — Timing constraints for Ethernet/IPv4/UDP Packet Processor
-#              Targets Xilinx 7-Series / UltraScale (Vivado XDC format)
 #
 # Target clock: 100 MHz (10.0 ns period)
 # The byte-serial pipeline stages (eth_parser → ipv4_parser → udp_parser)
@@ -11,10 +10,7 @@
 
 # ── Primary clock ─────────────────────────────────────────────────────────────
 # Define the main system clock on the clk port.
-# Adjust the period for your target frequency:
-#   10.0 ns → 100 MHz   (recommended minimum)
-#    8.0 ns → 125 MHz
-#    5.0 ns → 200 MHz
+#   10.0 ns → 100 MHz
 create_clock -period 10.0 -name clk [get_ports clk]
 
 # ── Input delays (relative to clk) ───────────────────────────────────────────
@@ -44,7 +40,6 @@ set_false_path -from [get_ports rst_n]
 # path from the first fold stage to the second fold register spans two
 # pipeline stages in the checksum modules.
 #
-# Relax setup by 2 cycles (hold automatically relaxed by 1 cycle).
 set_multicycle_path 2 -setup \
     -from [get_cells -hierarchical -filter {NAME =~ *carry_fold_reg*}] \
     -to   [get_cells -hierarchical -filter {NAME =~ *carry_fold_reg*}]
@@ -60,21 +55,3 @@ set_multicycle_path 2 -setup \
 set_multicycle_path 1 -hold  \
     -from [get_cells -hierarchical -filter {NAME =~ *checksum*accum*}] \
     -to   [get_cells -hierarchical -filter {NAME =~ *checksum_ok*}]
-
-# ── AXI-Stream interface constraints ─────────────────────────────────────────
-# All AXI-Stream signals (tdata, tvalid, tlast, tready) are fully registered
-# at both input and output of the top-level, so they are covered by the global
-# input/output delay constraints above.  No additional multicycle exceptions
-# are needed for the AXI handshake signals.
-#
-# If the downstream consumer has a long combinational path on tready, uncomment
-# the following to relax tready timing by one extra cycle:
-#
-# set_multicycle_path 2 -setup -through [get_nets -hierarchical -filter {NAME =~ *tready*}]
-# set_multicycle_path 1 -hold  -through [get_nets -hierarchical -filter {NAME =~ *tready*}]
-
-# ── Single clock domain ───────────────────────────────────────────────────────
-# All logic in this design is in a single clock domain (clk).
-# No clock domain crossing (CDC) constraints are required.
-# If a second clock is added (e.g., for a management/config interface),
-# add set_clock_groups -asynchronous or appropriate CDC constraints here.
