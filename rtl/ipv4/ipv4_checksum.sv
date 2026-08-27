@@ -34,6 +34,8 @@
 //   - 'done' pulses when calculation completes (one cycle after last byte)
 //================================================================================
 
+`timescale 1ns/1ps
+
 module ipv4_checksum #(
     parameter DATA_WIDTH = 8  // Input data width in bits (must be 8)
 )(
@@ -106,10 +108,20 @@ always_ff @(posedge clk) begin
         byte_hi     <= 8'd0;
         has_byte_hi <= 1'b0;
     end else begin
-        // Clear accumulator at the start of each new packet
+        // Clear accumulator at the start of each new packet.
+        // Header byte 0 is presented in this SAME cycle, while the FSM is still
+        // in IDLE - the ACCUMULATE branch below will never see it, so stage it
+        // here or every checksum is computed over a truncated header.
+        // Byte 0 is even and is never part of the checksum field (bytes 10-11),
+        // so it always becomes the high byte of the first 16-bit word.
         if (state == IDLE && start) begin
             running_sum <= 21'd0;
-            has_byte_hi <= 1'b0;
+            if (data_valid) begin
+                byte_hi     <= data_byte;
+                has_byte_hi <= 1'b1;
+            end else begin
+                has_byte_hi <= 1'b0;
+            end
         end
 
         if (state == ACCUMULATE && data_valid) begin

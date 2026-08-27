@@ -26,6 +26,8 @@
 //   VALIDATE_UDP_CHKSUM – 1: enable UDP checksum validation
 //================================================================================
 
+`timescale 1ns/1ps
+
 module packet_processor_top #(
     parameter DROP_FRAGMENTS      = 1,
     parameter VALIDATE_IP_CHKSUM  = 1,
@@ -210,9 +212,15 @@ always_ff @(posedge clk) begin
     else        eth_m_valid_prev <= eth_m_tvalid;
 end
 
-assign ip_chk_start = eth_m_tvalid & ~eth_m_valid_prev;
+// Qualified with ~ip_chk_counting so a mid-frame TVALID gap cannot re-trigger
+// 'start' and restart the accumulation partway through the header.
+assign ip_chk_start = eth_m_tvalid & ~eth_m_valid_prev & ~ip_chk_counting;
 
-// Byte counter for the IPv4 checksum module
+// Byte counter for the IPv4 checksum module.
+// Header byte 0 is ALREADY on the bus during the 'start' cycle (eth_parser
+// forwards it in the same cycle it raises TVALID), so the counter advances to 1
+// here.  Setting it to 0 instead would make byte_count lag the bus by one and
+// read the checksum field from bytes 11-12 rather than 10-11.
 always_ff @(posedge clk) begin
     if (!rst_n) begin
         ip_chk_byte_cnt  <= 6'd0;
@@ -221,17 +229,19 @@ always_ff @(posedge clk) begin
         ip_rcv_chk_lo    <= 8'd0;
     end else begin
         if (ip_chk_start) begin
-            ip_chk_byte_cnt <= 6'd0;
+            ip_chk_byte_cnt <= 6'd1;      // byte 0 is consumed this cycle
             ip_chk_counting <= 1'b1;
         end else if (ip_chk_counting && eth_m_tvalid && eth_m_tready) begin
             // Capture received checksum at bytes 10-11
             if (ip_chk_byte_cnt == 6'd10) ip_rcv_chk_hi <= eth_m_tdata;
             if (ip_chk_byte_cnt == 6'd11) ip_rcv_chk_lo <= eth_m_tdata;
 
-            if (ip_chk_byte_cnt >= ({ip_ihl, 2'b00} - 6'd1))
+            if (ip_chk_byte_cnt >= ({ip_ihl, 2'b00} - 6'd1)) begin
                 ip_chk_counting <= 1'b0;
-            else
+                ip_chk_byte_cnt <= 6'd0;  // re-arm: next frame's byte 0 needs cnt==0
+            end else begin
                 ip_chk_byte_cnt <= ip_chk_byte_cnt + 6'd1;
+            end
         end
     end
 end
@@ -258,13 +268,13 @@ generate
 
         assign ip_chk_done = ip_chk_done_i;
 
-        // Validate: the calculated checksum must match the received checksum
-        always_ff @(posedge clk) begin
-            if (!rst_n)
-                ip_chk_valid <= 1'b1;
-            else if (ip_chk_done_i)
-                ip_chk_valid <= (ip_calc_chk == {ip_rcv_chk_hi, ip_rcv_chk_lo});
-        end
+        // Validate: the calculated checksum must match the received one.
+        // Deliberately COMBINATIONAL, not registered.  pipeline_ctrl samples
+        // this on the same cycle ip_chk_done is asserted, and ip_calc_chk is
+        // already final on that cycle ('done' and 'calculated_checksum' are
+        // registered together inside ipv4_checksum).  Registering the compare
+        // here would hand pipeline_ctrl the PREVIOUS packet's verdict.
+        assign ip_chk_valid = (ip_calc_chk == {ip_rcv_chk_hi, ip_rcv_chk_lo});
 
         assign ip_chk_calculated = ip_calc_chk;
     end else begin : gen_ip_chksum_bypass
@@ -316,6 +326,8 @@ pipeline_ctrl u_pipeline_ctrl (
     .rst_n            (rst_n),
     .ip_header_valid  (ip_header_valid),
     .is_fragment      (ip_is_fragment),
+    .ip_chk_valid     (ip_chk_valid),
+    .ip_chk_done      (ip_chk_done),
     .udp_header_valid (udp_header_valid),
     .udp_chk_valid    (udp_chk_valid),
     .udp_chk_done     (udp_chk_done),

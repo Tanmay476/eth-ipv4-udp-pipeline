@@ -23,6 +23,8 @@
 //   4. 'done' pulses for one cycle; 'checksum_valid' holds the result.
 //================================================================================
 
+`timescale 1ns/1ps
+
 module udp_checksum (
     input  logic        clk,
     input  logic        rst_n,
@@ -71,13 +73,33 @@ logic [31:0] running_sum;
 logic [7:0]  byte_hi;
 logic        has_byte_hi;
 
+// ─── Pseudo-header + UDP header pre-load ─────────────────────────────────────
+// Pseudo-header (12 bytes = 6 words): src_ip[31:16], src_ip[15:0],
+//   dst_ip[31:16], dst_ip[15:0], {0x00, 0x11}, udp_length
+// UDP header (8 bytes = 4 words): src_port, dst_port, udp_length,
+//   received_checksum (included so a correct packet folds to 0xFFFF).
+logic [31:0] hdr_preload;
+
+assign hdr_preload = {16'd0, ip_src_addr[31:16]}
+                   + {16'd0, ip_src_addr[15:0]}
+                   + {16'd0, ip_dst_addr[31:16]}
+                   + {16'd0, ip_dst_addr[15:0]}
+                   + 32'd17                          // protocol = 0x11
+                   + {16'd0, udp_total_length}
+                   + {16'd0, udp_src_port}
+                   + {16'd0, udp_dst_port}
+                   + {16'd0, udp_total_length}
+                   + {16'd0, received_checksum};
+
 // ─── Combinational fold for finalization ─────────────────────────────────────
 logic [31:0] pre_fold_sum;
 logic [16:0] fold1;
 logic [15:0] fold2;
 
+// A leftover staged byte is the HIGH byte of a zero-padded final word
+// ({byte_hi, 8'h00}), not a low byte - hence the << 8 placement.
 assign pre_fold_sum = has_byte_hi
-                    ? running_sum + {24'd0, byte_hi}  // pad odd byte at MSB position
+                    ? running_sum + {16'd0, byte_hi, 8'd0}
                     : running_sum;
 
 // Two-stage carry folding: any 32-bit sum → 16-bit
@@ -94,7 +116,13 @@ end
 always_comb begin
     next_state = state;
     case (state)
-        IDLE:        if (start)                    next_state = ACCUMULATE;
+        // The first payload byte is presented in the SAME cycle as 'start'
+        // (udp_parser raises udp_header_valid and forwards payload byte 0
+        // together).  A single-byte payload is therefore already complete
+        // here and must go straight to FINALIZE, or the FSM would wait in
+        // ACCUMULATE for an is_last that has already gone by.
+        IDLE:        if (start && data_valid && is_last) next_state = FINALIZE;
+                     else if (start)                     next_state = ACCUMULATE;
         ACCUMULATE:  if (data_valid && is_last)    next_state = FINALIZE;
         FINALIZE:                                  next_state = IDLE;
         default:                                   next_state = IDLE;
@@ -115,24 +143,21 @@ always_ff @(posedge clk) begin
         case (state)
             IDLE: begin
                 if (start) begin
-                    // Pre-load: sum of IPv4 pseudo-header + UDP header
-                    // Pseudo-header (12 bytes = 6 words):
-                    //   src_ip[31:16], src_ip[15:0],
-                    //   dst_ip[31:16], dst_ip[15:0],
-                    //   {0x00, 0x11},  udp_length
-                    // UDP header (8 bytes = 4 words):
-                    //   src_port, dst_port, udp_length, received_checksum
-                    running_sum <= {16'd0, ip_src_addr[31:16]}
-                                 + {16'd0, ip_src_addr[15:0]}
-                                 + {16'd0, ip_dst_addr[31:16]}
-                                 + {16'd0, ip_dst_addr[15:0]}
-                                 + 32'd17                          // protocol = 0x11
-                                 + {16'd0, udp_total_length}
-                                 + {16'd0, udp_src_port}
-                                 + {16'd0, udp_dst_port}
-                                 + {16'd0, udp_total_length}
-                                 + {16'd0, received_checksum};     // include for validation
-                    has_byte_hi <= 1'b0;
+                    // Pre-load the pseudo-header + UDP header sum (hdr_preload),
+                    // and fold in payload byte 0, which is presented in this
+                    // same cycle - dropping it corrupts every checksum.
+                    if (data_valid && is_last) begin
+                        // Single-byte payload: pad it at the high position.
+                        running_sum <= hdr_preload + {16'd0, data_byte, 8'd0};
+                        has_byte_hi <= 1'b0;
+                    end else if (data_valid) begin
+                        running_sum <= hdr_preload;
+                        byte_hi     <= data_byte;
+                        has_byte_hi <= 1'b1;
+                    end else begin
+                        running_sum <= hdr_preload;
+                        has_byte_hi <= 1'b0;
+                    end
                 end
             end
 
@@ -140,8 +165,10 @@ always_ff @(posedge clk) begin
                 if (data_valid) begin
                     if (!has_byte_hi) begin
                         if (is_last) begin
-                            // Odd-length payload: pad final byte at high position
-                            running_sum <= running_sum + {24'd0, data_byte} << 8;
+                            // Odd-length payload: pad final byte at high position.
+                            // NOTE: the shift must be parenthesised - '+' binds
+                            // tighter than '<<', so "a + b << 8" is "(a+b) << 8".
+                            running_sum <= running_sum + {16'd0, data_byte, 8'd0};
                             has_byte_hi <= 1'b0;
                         end else begin
                             // Stage the high byte

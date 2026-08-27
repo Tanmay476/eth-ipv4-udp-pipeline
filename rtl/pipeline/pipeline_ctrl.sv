@@ -20,6 +20,8 @@
 //     - UDP checksum error   → udp_chk_valid = 0    (optional)
 //================================================================================
 
+`timescale 1ns/1ps
+
 module pipeline_ctrl (
     input  logic clk,
     input  logic rst_n,
@@ -27,6 +29,8 @@ module pipeline_ctrl (
     // ── Status inputs from individual parser stages ──────────────────────────
     input  logic ip_header_valid,    // From ipv4_parser: IP header passed checks
     input  logic is_fragment,        // From ipv4_parser: packet is fragmented
+    input  logic ip_chk_valid,       // From ipv4_checksum: header checksum correct
+    input  logic ip_chk_done,        // From ipv4_checksum: checksum result ready
     input  logic udp_header_valid,   // From udp_parser:  forwarding UDP payload
     input  logic udp_chk_valid,      // From udp_checksum: UDP checksum correct
     input  logic udp_chk_done,       // From udp_checksum: checksum result ready
@@ -44,7 +48,7 @@ module pipeline_ctrl (
     // error_flags[0] : IP header invalid (bad version / IHL / protocol / fragment)
     // error_flags[1] : IP packet is fragmented
     // error_flags[2] : UDP checksum error
-    // error_flags[3] : reserved
+    // error_flags[3] : IPv4 header checksum error
 );
 
 // ─── Latched status registers ─────────────────────────────────────────────────
@@ -54,12 +58,14 @@ module pipeline_ctrl (
 logic ip_ok_lat;
 logic frag_lat;
 logic udp_chk_ok_lat;
+logic ip_chk_ok_lat;
 
 always_ff @(posedge clk) begin
     if (!rst_n) begin
         ip_ok_lat     <= 1'b0;
         frag_lat      <= 1'b0;
         udp_chk_ok_lat <= 1'b1;
+        ip_chk_ok_lat  <= 1'b1;
     end else begin
         // Latch IP validity when the IP header stage completes
         if (ip_header_valid)
@@ -68,6 +74,12 @@ always_ff @(posedge clk) begin
         // Latch fragmentation flag alongside IP validity
         if (ip_header_valid || is_fragment)
             frag_lat <= is_fragment;
+
+        // Latch the IPv4 header checksum result when it arrives.  This lands
+        // during the IP header, well before udp_header_valid rises, so it is
+        // already settled when metadata_formatter samples packet_valid.
+        if (ip_chk_done)
+            ip_chk_ok_lat <= ip_chk_valid;
 
         // Latch UDP checksum result when it arrives
         if (udp_chk_done)
@@ -78,6 +90,7 @@ always_ff @(posedge clk) begin
             ip_ok_lat      <= 1'b0;
             frag_lat       <= 1'b0;
             udp_chk_ok_lat <= 1'b1;  // Default: assume OK for next packet
+            ip_chk_ok_lat  <= 1'b1;
         end
     end
 end
@@ -88,8 +101,10 @@ always_comb begin
     error_flags[0] = ~ip_ok_lat;
     error_flags[1] = frag_lat;
     error_flags[2] = ~udp_chk_ok_lat;
+    error_flags[3] = ~ip_chk_ok_lat;
 
-    packet_valid   = udp_header_valid && ip_ok_lat && udp_chk_ok_lat && !frag_lat;
+    packet_valid   = udp_header_valid && ip_ok_lat && udp_chk_ok_lat
+                     && ip_chk_ok_lat && !frag_lat;
     packet_error   = |error_flags;
 end
 
