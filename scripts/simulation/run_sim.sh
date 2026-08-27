@@ -6,8 +6,8 @@
 #   ./scripts/simulation/run_sim.sh [OPTIONS]
 #
 # Options:
-#   --sim <tool>     Simulator to use: verilator|iverilog|questa|modelsim|vcs
-#                    Default: verilator (if available), else iverilog
+#   --sim <tool>     Simulator to use: verilator|iverilog|questa|modelsim|vcs|xsim
+#                    Default: verilator (if available), else iverilog, else xsim
 #   --wave           Enable VCD waveform dump (sim/tb_packet_processor.vcd)
 #   --test <suite>   Run a specific test suite: basic|error|throughput|all
 #                    Default: all
@@ -20,6 +20,8 @@
 #   questa     — Mentor Questa / ModelSim-SE (vlog/vsim)
 #   modelsim   — Mentor ModelSim (vlog/vsim, same flow as questa)
 #   vcs        — Synopsys VCS
+#   xsim       — Vivado's bundled simulator (xvlog/xelab/xsim); no separate
+#                license needed beyond a Vivado install
 # =============================================================================
 
 set -euo pipefail
@@ -67,7 +69,8 @@ if [[ -z "${SIMULATOR}" ]]; then
     elif command -v iverilog  &>/dev/null; then SIMULATOR="iverilog"
     elif command -v vlog      &>/dev/null; then SIMULATOR="questa"
     elif command -v vcs       &>/dev/null; then SIMULATOR="vcs"
-    else die "No supported simulator found. Install verilator or iverilog, or specify one with --sim."
+    elif command -v xvlog     &>/dev/null; then SIMULATOR="xsim"
+    else die "No supported simulator found. Install verilator or iverilog, source a Vivado environment for xsim, or specify one with --sim."
     fi
     info "Auto-detected simulator: ${SIMULATOR}"
 fi
@@ -223,6 +226,31 @@ run_vcs() {
     "${SIM_DIR}/sim_vcs" 2>&1 | tee "${SIM_DIR}/sim.log"
 }
 
+run_xsim() {
+    command -v xvlog &>/dev/null || die "xvlog not found in PATH (source a Vivado settings64.sh / setup_env.sh first)"
+    command -v xelab &>/dev/null || die "xelab not found in PATH"
+    command -v xsim  &>/dev/null || die "xsim not found in PATH"
+
+    cd "${PROJECT_ROOT}"
+
+    info "Compiling with Vivado xsim (xvlog)..."
+    XVLOG_FLAGS=(
+        -sv
+        -i "${PROJECT_ROOT}/tb/tests"
+        -i "${PROJECT_ROOT}/tb/packet_gen"
+        --log "${SIM_DIR}/xvlog.log"
+    )
+    [[ "${WAVE}" -eq 1 ]] && XVLOG_FLAGS+=(-d DUMP_WAVES)
+
+    xvlog "${XVLOG_FLAGS[@]}" "${ALL_FILES[@]}"
+
+    info "Elaborating (xelab)..."
+    xelab tb_packet_processor -s tb_snap --log "${SIM_DIR}/xelab.log"
+
+    info "Running simulation..."
+    xsim tb_snap -R --log "${SIM_DIR}/xsim.log" 2>&1 | tee "${SIM_DIR}/sim.log"
+}
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -238,6 +266,7 @@ case "${SIMULATOR}" in
     iverilog)               run_iverilog  ;;
     questa|modelsim)        run_questa    ;;
     vcs)                    run_vcs       ;;
+    xsim)                   run_xsim      ;;
     *) die "Unsupported simulator '${SIMULATOR}'" ;;
 esac
 

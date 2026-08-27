@@ -14,6 +14,8 @@
 //   USER_WIDTH - Width of the TUSER sideband in bits (default 1)
 //================================================================================
 
+`timescale 1ns/1ps
+
 interface axi_stream_if #(
     parameter DATA_WIDTH = 8,
     parameter USER_WIDTH = 1

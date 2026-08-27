@@ -29,6 +29,21 @@ set part    "xc7a100tcsg324-1"
 set top     "packet_processor_top"
 set jobs    4
 
+# Out-of-context synthesis (no I/O buffer insertion).
+#
+# packet_processor_top has 270 top-level ports - 246 of them the metadata
+# sideband (2x48-bit MAC, 2x32-bit IP, ports, lengths, flags) - while
+# xc7a100t-csg324 offers only 210 user I/O.  As a pin-out top level the
+# design therefore CANNOT be placed on this part (or most others); no
+# pinout.xdc can fix a port-count deficit.  The sideband is clearly an
+# internal interface, so this is an IP core meant to be instantiated inside
+# a larger design, and OOC is the correct mode: it skips IBUF/OBUF insertion
+# and reports timing on the core logic itself.
+#
+# Set to 0 only when targeting a real board with a top level whose port
+# count fits the package, together with a pinout.xdc.
+set ooc     1
+
 # ── Parse -tclargs overrides ──────────────────────────────────────────────────
 if { [llength $argv] > 0 } {
     for { set i 0 } { $i < [llength $argv] } { incr i } {
@@ -37,6 +52,7 @@ if { [llength $argv] > 0 } {
             --part  { incr i; set part  [lindex $argv $i] }
             --top   { incr i; set top   [lindex $argv $i] }
             --jobs  { incr i; set jobs  [lindex $argv $i] }
+            --ooc   { incr i; set ooc   [lindex $argv $i] }
             default { puts "WARNING: Unknown argument: $arg" }
         }
     }
@@ -74,7 +90,7 @@ set rtl_files [list \
 ]
 
 # ── Read RTL ──────────────────────────────────────────────────────────────────
-puts "\n[Step 1/6] Reading RTL sources..."
+puts "\nStep 1/6: Reading RTL sources..."
 foreach f $rtl_files {
     if { ![file exists $f] } {
         error "RTL file not found: $f"
@@ -84,7 +100,7 @@ foreach f $rtl_files {
 }
 
 # ── Read constraints ──────────────────────────────────────────────────────────
-puts "\n[Step 2/6] Reading constraints..."
+puts "\nStep 2/6: Reading constraints..."
 set xdc_file "${constr_dir}/timing.xdc"
 if { ![file exists $xdc_file] } {
     error "Constraints file not found: $xdc_file"
@@ -93,14 +109,20 @@ read_xdc $xdc_file
 puts "  + timing.xdc"
 
 # ── Synthesis ─────────────────────────────────────────────────────────────────
-puts "\n[Step 3/6] Running synthesis (synth_design)..."
-synth_design \
+puts "\nStep 3/6: Running synthesis (synth_design)..."
+set synth_args [list \
     -top    ${top}  \
     -part   ${part} \
     -flatten_hierarchy rebuilt \
     -fsm_extraction     one_hot \
     -keep_equivalent_registers \
-    -resource_sharing   off
+    -resource_sharing   off \
+]
+if { $ooc } {
+    puts "  (out-of-context mode: no I/O buffers inserted)"
+    lappend synth_args -mode out_of_context
+}
+synth_design {*}$synth_args
 
 write_checkpoint -force "${impl_dir}/post_synth.dcp"
 report_timing_summary -file "${impl_dir}/timing_post_synth.rpt"
@@ -109,19 +131,22 @@ report_utilization    -file "${impl_dir}/utilization_post_synth.rpt"
 puts "  Synthesis complete. Checkpoint: ${impl_dir}/post_synth.dcp"
 
 # ── Optimization ─────────────────────────────────────────────────────────────
-puts "\n[Step 4/6] Running opt_design..."
+puts "\nStep 4/6: Running opt_design..."
 opt_design
 
 # ── Placement ─────────────────────────────────────────────────────────────────
-puts "\n[Step 5/6] Running place_design..."
-place_design -directive ExploreSpreadLogic
+puts "\nStep 5/6: Running place_design..."
+# 'ExploreSpreadLogic' is not a Vivado directive and made place_design fail.
+# 'Explore' is the general high-effort directive (the spread-logic variants
+# are named AltSpreadLogic_high/medium/low if congestion becomes an issue).
+place_design -directive Explore
 
 phys_opt_design
 
 write_checkpoint -force "${impl_dir}/post_place.dcp"
 
 # ── Routing ───────────────────────────────────────────────────────────────────
-puts "\n[Step 6/6] Running route_design..."
+puts "\nStep 6/6: Running route_design..."
 route_design -directive Explore
 
 write_checkpoint -force "${impl_dir}/post_impl.dcp"

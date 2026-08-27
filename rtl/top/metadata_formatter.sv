@@ -25,6 +25,8 @@
 //   error_flags  - Aggregated error bits from pipeline_ctrl
 //================================================================================
 
+`timescale 1ns/1ps
+
 module metadata_formatter (
     input  logic        clk,
     input  logic        rst_n,

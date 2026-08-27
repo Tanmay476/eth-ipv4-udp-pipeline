@@ -7,6 +7,10 @@ sim/
 transcript
 work/
 *.vstf
+xsim.dir/
+*.wdb
+*.pb
+*.jou
 
 # Synthesis files
 *.bit
@@ -34,3 +38,4 @@ Thumbs.db
 .vscode/
 .idea/
 *.sublime-*
+clockInfo.txt

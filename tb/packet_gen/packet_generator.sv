@@ -17,6 +17,8 @@
 //   IPv4 and UDP checksums are computed automatically.
 //================================================================================
 
+`timescale 1ns/1ps
+
 module packet_generator (
     input  logic        clk,
     input  logic        rst_n,

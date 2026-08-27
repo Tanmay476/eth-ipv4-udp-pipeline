@@ -15,6 +15,8 @@
 //     packets_failed   – comparisons that did not match
 //================================================================================
 
+`timescale 1ns/1ps
+
 module scoreboard (
     input logic clk,
     input logic rst_n,
