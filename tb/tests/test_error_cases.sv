@@ -90,6 +90,52 @@ task run_error_tests();
         pkt_gen.send_raw_bytes(frag_frame, 42, 8);
     end
 
+    // ── Corrupt IPv4 header checksum ──────────────────────────────────────────
+    // Structurally valid UDP packet (version 4, IHL 5, protocol 0x11, not
+    // fragmented) whose IPv4 header checksum is wrong.  The UDP checksum field
+    // is 0x0000 (disabled per RFC 768) so the ONLY thing that can fail this
+    // packet is the IPv4 header checksum - isolating that check.
+    // Correct checksum for this header is 0xF77A; 0xDEAD is deliberately wrong.
+    $display("\n---- Test: Bad IPv4 header checksum (should be flagged) ----");
+    begin
+        automatic logic [7:0] badck_frame[];
+        badck_frame = new[44];
+        // Ethernet header
+        badck_frame[0]=8'hFF; badck_frame[1]=8'hFF; badck_frame[2]=8'hFF;
+        badck_frame[3]=8'hFF; badck_frame[4]=8'hFF; badck_frame[5]=8'hFF;
+        badck_frame[6]=8'h00; badck_frame[7]=8'h11; badck_frame[8]=8'h22;
+        badck_frame[9]=8'h33; badck_frame[10]=8'h44; badck_frame[11]=8'h55;
+        badck_frame[12]=8'h08; badck_frame[13]=8'h00;   // EtherType = IPv4
+        // IPv4 header (20 bytes)
+        badck_frame[14]=8'h45; badck_frame[15]=8'h00;   // v4, IHL=5
+        badck_frame[16]=8'h00; badck_frame[17]=8'h1E;   // total length = 30
+        badck_frame[18]=8'h00; badck_frame[19]=8'h01;   // ID
+        badck_frame[20]=8'h00; badck_frame[21]=8'h00;   // no fragment
+        badck_frame[22]=8'h40; badck_frame[23]=8'h11;   // TTL=64, proto=UDP
+        badck_frame[24]=8'hDE; badck_frame[25]=8'hAD;   // BAD checksum (should be F77A)
+        badck_frame[26]=8'hC0; badck_frame[27]=8'hA8; badck_frame[28]=8'h01; badck_frame[29]=8'h01;
+        badck_frame[30]=8'hC0; badck_frame[31]=8'hA8; badck_frame[32]=8'h01; badck_frame[33]=8'h02;
+        // UDP header (8 bytes) + 2-byte payload
+        badck_frame[34]=8'h04; badck_frame[35]=8'hD2;   // src port 1234
+        badck_frame[36]=8'h16; badck_frame[37]=8'h2E;   // dst port 5678
+        badck_frame[38]=8'h00; badck_frame[39]=8'h0A;   // UDP length = 10
+        badck_frame[40]=8'h00; badck_frame[41]=8'h00;   // UDP checksum disabled
+        badck_frame[42]=8'hAA; badck_frame[43]=8'hBB;   // payload
+
+        // The frame still parses, so metadata is emitted - but packet_valid
+        // must be 0, with error_flags[3] (IPv4 header checksum) set.
+        sb.add_expected_packet(
+            .src_ip    (32'hC0A80101),
+            .dst_ip    (32'hC0A80102),
+            .src_port  (16'd1234),
+            .dst_port  (16'd5678),
+            .udp_length(16'd10),
+            .should_be_valid(1'b0)
+        );
+
+        pkt_gen.send_raw_bytes(badck_frame, 44, 8);
+    end
+
     // ── Valid packet after errors (pipeline must recover) ─────────────────────
     $display("\n---- Test: Valid packet after error frames ----");
     begin

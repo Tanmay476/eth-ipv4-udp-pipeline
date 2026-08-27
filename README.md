@@ -103,7 +103,7 @@ with the first byte of the UDP payload on `m_axis`.
 | `meta_dst_port`   | 16     | UDP destination port               |
 | `meta_udp_length` | 16     | UDP length field (header + payload)|
 | `meta_payload_len`| 16     | UDP payload length (udp_length − 8)|
-| `meta_error_flags`| 4      | `[0]` IP header invalid, `[1]` fragmented, `[2]` UDP checksum error, `[3]` reserved |
+| `meta_error_flags`| 4      | `[0]` IP header invalid (version/IHL/protocol), `[1]` fragmented, `[2]` UDP checksum error, `[3]` IPv4 header checksum error |
 
 ## Simulation
 
@@ -142,7 +142,7 @@ The testbench runs three suites automatically:
 | Suite       | File                          | What it covers                                           |
 |-------------|-------------------------------|----------------------------------------------------------|
 | **basic**   | `tb/tests/test_basic_packets.sv`  | Single packet, back-to-back, min/max payload, metadata   |
-| **error**   | `tb/tests/test_error_cases.sv`    | Non-IPv4, non-UDP, fragments, bad IHL/version, bad checksum |
+| **error**   | `tb/tests/test_error_cases.sv`    | Non-IPv4, non-UDP, fragments, bad IPv4 header checksum, recovery |
 | **throughput** | `tb/tests/test_throughput.sv`  | 10-packet burst, backpressure (TREADY toggling), latency |
 
 ## Synthesis (Xilinx Vivado)
@@ -174,11 +174,26 @@ Outputs are written to `impl/`:
 | `impl/route_status.rpt`     | Routing completion status            |
 | `impl/drc.rpt`              | Design rule check results            |
 
+### Out-of-context synthesis
+
+`synth.tcl` runs in **out-of-context mode** (`set ooc 1`, or `--ooc 0` to
+disable). This is not optional on most parts: `packet_processor_top` exposes
+**270 port bits** — 246 of them the metadata sideband — while
+`xc7a100t-csg324` provides only 210 user I/O. The design therefore cannot be
+placed as a pin-out top level, and no `pinout.xdc` can close a port-count
+deficit. OOC skips I/O buffer insertion and reports timing on the core logic,
+which is the meaningful number for a block meant to be instantiated inside a
+larger design.
+
 ### Bitstream generation
 
-Bitstream generation requires board-specific pin assignment constraints.
-Add your I/O assignments to `constraints/pinout.xdc`, then uncomment the
-`write_bitstream` call at the bottom of `scripts/synthesis/synth.tcl`.
+This core is an IP block, not a standalone bitstream target. To build a
+bitstream, instantiate `packet_processor_top` inside a board-level wrapper
+that terminates the metadata sideband internally (into registers, a FIFO, or
+a bus interface) so the exposed port count fits the package. Then synthesize
+that wrapper with `--ooc 0`, supply a `constraints/pinout.xdc` for its ports,
+and uncomment the `write_bitstream` call at the bottom of
+`scripts/synthesis/synth.tcl`.
 
 ## Timing Constraints Summary
 
@@ -187,8 +202,10 @@ The `constraints/timing.xdc` file defines:
 - **Clock**: 10.0 ns (100 MHz) on `clk`
 - **I/O delays**: 2.0 ns max / 0.5 ns min setup/hold on all ports
 - **False path**: asynchronous `rst_n` assertion
-- **Multicycle paths**: 2-cycle relaxation for checksum carry-fold registers
-  in `ipv4_checksum` and `udp_checksum` — enables 400+ MHz checksum paths
+- **No multicycle exceptions**: the checksum carry-fold in `ipv4_checksum`
+  and `udp_checksum` is fully combinational (running_sum → fold1 → fold2 →
+  output register) and meets the full clock period on its own; no relaxation
+  is needed unless that path is later pipelined
 
 Adjust the `create_clock -period` value to target higher frequencies
 (e.g., `8.0` for 125 MHz, `5.0` for 200 MHz).

@@ -24,8 +24,8 @@ task run_throughput_tests();
             sb.add_expected_packet(
                 .src_ip    (32'h0A0B0C0D),
                 .dst_ip    (32'h0A0B0C0E),
-                .src_port  (16'd(5000 + i)),
-                .dst_port  (16'd(6000 + i)),
+                .src_port  (16'(5000 + i)),
+                .dst_port  (16'(6000 + i)),
                 .udp_length(16'd12),
                 .should_be_valid(1'b1)
             );
@@ -39,8 +39,8 @@ task run_throughput_tests();
                 .src_mac_in     (48'h00_1234_5678_9A),
                 .src_ip         (32'h0A0B0C0D),
                 .dst_ip         (32'h0A0B0C0E),
-                .src_port       (16'd(5000 + i)),
-                .dst_port       (16'd(6000 + i)),
+                .src_port       (16'(5000 + i)),
+                .dst_port       (16'(6000 + i)),
                 .payload        (p),
                 .payload_len    (4),
                 .gap_cycles     (0)
@@ -69,8 +69,12 @@ task run_throughput_tests();
             .should_be_valid(1'b1)
         );
 
-        // Note: the testbench drives m_axis_tready externally;
-        // here we just send the packet and let the handshaking resolve.
+        // Drive real backpressure: bp_enable hands m_axis_tready over to the
+        // toggling block in tb_packet_processor (deasserted every 5th cycle).
+        // Without this the flag stays 0, TREADY is stuck high, and this test
+        // silently exercises no backpressure at all.
+        bp_enable = 1'b1;
+
         pkt_gen.send_udp_packet(
             .dst_mac        (48'hFF_FFFF_FFFF_FF),
             .src_mac_in     (48'h00_CAFE_BABE_12),
@@ -82,6 +86,10 @@ task run_throughput_tests();
             .payload_len    (32),
             .gap_cycles     (4)
         );
+
+        // Let the frame drain through the pipeline before restoring TREADY.
+        repeat (100) @(posedge clk);
+        bp_enable = 1'b0;
     end
 
     // ── Latency measurement ───────────────────────────────────────────────────
@@ -101,21 +109,29 @@ task run_throughput_tests();
 
         @(posedge clk); #1;
         t_start = $time;
-        pkt_gen.send_udp_packet(
-            .dst_mac        (48'hFF_FFFF_FFFF_FF),
-            .src_mac_in     (48'h00_0102_0304_05),
-            .src_ip         (32'h01020304),
-            .dst_ip         (32'h05060708),
-            .src_port       (16'd100),
-            .dst_port       (16'd200),
-            .payload        (lat_pay),
-            .payload_len    (2),
-            .gap_cycles     (8)
-        );
 
-        // Measure cycles to first payload beat (proxy for pipeline latency)
-        @(posedge meta_valid_mon);
-        t_meta = $time;
+        // meta_valid pulses WHILE the frame is still streaming (it is emitted
+        // with the first payload byte), so the wait must be armed before the
+        // send - waiting after send_udp_packet returns would miss the pulse
+        // and block until the watchdog fires.
+        fork
+            begin
+                @(posedge meta_valid_mon);
+                t_meta = $time;
+            end
+
+            pkt_gen.send_udp_packet(
+                .dst_mac        (48'hFF_FFFF_FFFF_FF),
+                .src_mac_in     (48'h00_0102_0304_05),
+                .src_ip         (32'h01020304),
+                .dst_ip         (32'h05060708),
+                .src_port       (16'd100),
+                .dst_port       (16'd200),
+                .payload        (lat_pay),
+                .payload_len    (2),
+                .gap_cycles     (8)
+            );
+        join
         $display("[THROUGHPUT] Pipeline latency (start→meta_valid): %0d cycles",
                  (t_meta - t_start) / `CLK_PERIOD);
     end

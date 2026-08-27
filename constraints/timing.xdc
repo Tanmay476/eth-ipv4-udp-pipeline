@@ -4,8 +4,7 @@
 # Target clock: 100 MHz (10.0 ns period)
 # The byte-serial pipeline stages (eth_parser → ipv4_parser → udp_parser)
 # each complete header parsing in one byte per cycle, so all logic is
-# single-cycle registered. The checksum carry-fold finalization uses a
-# two-register chain that is explicitly relaxed with a multicycle path.
+# single-cycle registered, including the checksum carry-fold finalization.
 # =============================================================================
 
 # ── Primary clock ─────────────────────────────────────────────────────────────
@@ -33,25 +32,17 @@ set_output_delay -clock [get_clocks clk] -min 0.5 [all_outputs]
 # requirement on the assertion path itself.
 set_false_path -from [get_ports rst_n]
 
-# ── Multicycle paths: checksum carry-fold finalization ────────────────────────
-# ipv4_checksum and udp_checksum both use a two-stage registered carry-fold
-# to reduce the critical path of the final ones-complement reduction.
-# The carry-fold registers are clocked every cycle but the combinational
-# path from the first fold stage to the second fold register spans two
-# pipeline stages in the checksum modules.
-#
-set_multicycle_path 2 -setup \
-    -from [get_cells -hierarchical -filter {NAME =~ *carry_fold_reg*}] \
-    -to   [get_cells -hierarchical -filter {NAME =~ *carry_fold_reg*}]
-set_multicycle_path 1 -hold  \
-    -from [get_cells -hierarchical -filter {NAME =~ *carry_fold_reg*}] \
-    -to   [get_cells -hierarchical -filter {NAME =~ *carry_fold_reg*}]
-
-# Also relax the accumulator → checksum_ok path: the checksum valid flag is
-# only consumed the cycle after the fold completes (registered output).
-set_multicycle_path 2 -setup \
-    -from [get_cells -hierarchical -filter {NAME =~ *checksum*accum*}] \
-    -to   [get_cells -hierarchical -filter {NAME =~ *checksum_ok*}]
-set_multicycle_path 1 -hold  \
-    -from [get_cells -hierarchical -filter {NAME =~ *checksum*accum*}] \
-    -to   [get_cells -hierarchical -filter {NAME =~ *checksum_ok*}]
+# ── No multicycle exception on the checksum carry-fold ─────────────────────────
+# ipv4_checksum and udp_checksum fold the running sum (fold1/fold2) fully
+# combinationally between the running_sum register and the output register —
+# there is no intermediate carry_fold_reg pipeline stage in the current RTL,
+# so this path is a normal single-cycle register-to-register path and must
+# meet the full 10.0 ns clock period like everything else. Per the timing
+# comments in ipv4_checksum.sv, the fold logic is ~2.5-3.0 ns and meets this
+# budget without relaxation. A previous version of this constraint applied
+# set_multicycle_path against *carry_fold_reg*/*checksum_ok* cell name
+# patterns that don't exist in the design (get_cells matched nothing), which
+# would have silently masked a real setup violation had one existed. If the
+# checksum path is later pipelined (splitting FINALIZE into two states, per
+# the TODO in ipv4_checksum.sv), reintroduce a multicycle exception here
+# naming the actual pipeline registers.
