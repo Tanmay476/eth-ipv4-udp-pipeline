@@ -20,6 +20,8 @@
 //   - Zero-checksum detection (RFC 768: checksum=0 means disabled)
 //================================================================================
 
+`timescale 1ns/1ps
+
 module udp_parser #(
     parameter DATA_BUS_WIDTH = 8  // Width of the data bus in bits
 )(
@@ -104,8 +106,6 @@ always_ff @(posedge clk) begin
         dst_port_buf <= 16'd0;
         length_buf   <= 16'd0;
         checksum_buf <= 16'd0;
-        m_axis_tdata <= 8'd0;
-        m_axis_tlast <= 1'b0;
     end else begin
         if (next_state == IDLE)
             byte_count <= 3'd0;
@@ -128,18 +128,8 @@ always_ff @(posedge clk) begin
                     byte_count <= byte_count + 3'd1;
                 end
 
-                FORWARD_PAYLOAD: begin
-                    if (m_axis_tready) begin
-                        m_axis_tdata <= s_axis_tdata;
-                        m_axis_tlast <= s_axis_tlast;
-                    end
-                end
-
                 default: ;
             endcase
-        end else begin
-            if (state == IDLE)
-                m_axis_tlast <= 1'b0;
         end
     end
 end
@@ -151,6 +141,11 @@ always_comb begin
     udp_length        = length_buf;
     udp_checksum      = checksum_buf;
     checksum_disabled = (checksum_buf == 16'd0);
+
+    // Payload path is a combinational pass-through: TDATA/TLAST must be
+    // presented in the SAME cycle as TVALID (see eth_parser for rationale).
+    m_axis_tdata = s_axis_tdata;
+    m_axis_tlast = s_axis_tlast;
 
     case (state)
         IDLE: begin

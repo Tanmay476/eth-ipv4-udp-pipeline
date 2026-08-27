@@ -19,6 +19,8 @@
 //
 //================================================================================
 
+`timescale 1ns/1ps
+
 module ipv4_parser #(
     parameter DATA_BUS_WIDTH = 8,      // Width of the data bus in bits
     parameter VALIDATE_CHECKSUM = 0,   // Enable header checksum validation
@@ -106,7 +108,17 @@ always_comb begin
         end
 
         PARSE_HEADER: begin
-            if (byte_count >= header_length_bytes && header_length_bytes > 0) begin
+            // Leave PARSE_HEADER on the cycle the LAST header byte is accepted
+            // (byte_count == header_length_bytes - 1).  Comparing
+            // byte_count >= header_length_bytes instead would keep TREADY high
+            // for one extra cycle and silently swallow the first payload byte.
+            if (s_axis_tvalid && s_axis_tready && s_axis_tlast) begin
+                // Frame ended mid-header (truncated, or a bogus IHL that the
+                // byte count can never reach) - abort rather than wedge here.
+                next_state = IDLE;
+            end else if (s_axis_tvalid && s_axis_tready &&
+                         (header_length_bytes > 0) &&
+                         (byte_count == header_length_bytes - 6'd1)) begin
                 next_state = VALIDATE_HEADER;
             end else begin
                 next_state = PARSE_HEADER;
@@ -164,8 +176,6 @@ always_ff @(posedge clk) begin
         fragment_offset <= 0;
         more_fragments <= 0;
         is_fragment_buffer <= 0;
-        m_axis_tdata <= 0;
-        m_axis_tlast <= 0;
     end else begin
         // Reset byte_count when returning to IDLE
         if (state == IDLE) begin
@@ -174,8 +184,11 @@ always_ff @(posedge clk) begin
         end
 
         if (s_axis_tvalid && s_axis_tready) begin
-            // Parse header bytes
-            if (state == PARSE_HEADER) begin
+            // Parse header bytes.  IDLE is included because the upstream stage
+            // presents the first header byte in the same cycle it raises TVALID,
+            // while this stage is still in IDLE with TREADY asserted.  Parsing
+            // only in PARSE_HEADER would drop that byte.
+            if (state == IDLE || state == PARSE_HEADER) begin
                 case (byte_count)
                     0: begin
                         ip_version_buffer <= s_axis_tdata[7:4];
@@ -237,18 +250,6 @@ always_ff @(posedge clk) begin
                 byte_count <= byte_count + 1;
             end
 
-            // Forward payload bytes
-            if (state == FORWARD_PAYLOAD) begin
-                if (m_axis_tready) begin
-                    m_axis_tdata <= s_axis_tdata;
-                    m_axis_tlast <= s_axis_tlast;
-                end
-            end
-        end else begin
-            // Clear tlast when not actively transferring
-            if (!s_axis_tvalid || state == IDLE) begin
-                m_axis_tlast <= 0;
-            end
         end
     end
 end
@@ -264,6 +265,11 @@ always_comb begin
     ip_src_addr = ip_src_addr_buffer;
     ip_dest_addr = ip_dest_addr_buffer;
     is_fragment = is_fragment_buffer;
+
+    // Payload path is a combinational pass-through: TDATA/TLAST must be
+    // presented in the SAME cycle as TVALID (see eth_parser for rationale).
+    m_axis_tdata = s_axis_tdata;
+    m_axis_tlast = s_axis_tlast;
 
     // Control signals based on state
     case(state)

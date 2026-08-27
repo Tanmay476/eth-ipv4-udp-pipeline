@@ -22,6 +22,8 @@
 //   - FCS/CRC validation
 //================================================================================
 
+`timescale 1ns/1ps
+
 module eth_parser #(
     parameter DATA_BUS_WIDTH = 8, // Width of the data bus in bits
     parameter ENABLE_VLAN    = 0, // VLAN tagging support (not implemented)
@@ -107,8 +109,6 @@ always_ff @(posedge clk) begin
         dest_mac_buf  <= 48'd0;
         src_mac_buf   <= 48'd0;
         ether_type_buf <= 16'd0;
-        m_axis_tdata  <= 8'd0;
-        m_axis_tlast  <= 1'b0;
     end else begin
         // Reset byte counter when the current transfer finishes (next state = IDLE)
         if (next_state == IDLE)
@@ -130,18 +130,8 @@ always_ff @(posedge clk) begin
                     byte_count <= byte_count + 4'd1;
                 end
 
-                FORWARD_PAYLOAD: begin
-                    if (m_axis_tready) begin
-                        m_axis_tdata <= s_axis_tdata;
-                        m_axis_tlast <= s_axis_tlast;
-                    end
-                end
-
                 default: ;
             endcase
-        end else begin
-            if (state == IDLE)
-                m_axis_tlast <= 1'b0;
         end
     end
 end
@@ -151,6 +141,14 @@ always_comb begin
     dest_mac   = dest_mac_buf;
     src_mac    = src_mac_buf;
     ether_type = ether_type_buf;
+
+    // Payload path is a combinational pass-through: TDATA/TLAST must be
+    // presented in the SAME cycle as TVALID.  Registering them here while
+    // driving TVALID combinationally would skew data one cycle behind valid
+    // and, critically, would prevent TLAST from ever coinciding with TVALID
+    // at the downstream stage (leaving it stuck in FORWARD_PAYLOAD forever).
+    m_axis_tdata = s_axis_tdata;
+    m_axis_tlast = s_axis_tlast;
 
     case (state)
         IDLE: begin
